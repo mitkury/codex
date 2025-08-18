@@ -1,7 +1,7 @@
 ### Overview
-- **Reading**: Use `functions.read_file` to fetch exact line ranges (or whole files) with numbered output.
-- **Patching**: Use `functions.apply_patch` to apply structured, context-aware edits that are resilient to line-number shifts.
-- **Editing (fallback)**: Use `functions.edit_file` for extremely targeted replacements when patching is ambiguous or repeatedly failing.
+- The agent runs a decide→act loop: respond directly or call tools, incorporate results, and iterate until the task is done.
+- **Tools**: `functions.grep` (search), `functions.read_file` (read ranges/whole), `functions.list_dir` (list dirs), `functions.apply_patch` (context diffs), `functions.edit_file` (fallback edits), `functions.delete_file` (delete), `functions.run_terminal_cmd` (shell), `functions.fetch_rules` (repo rules), `functions.fetch_pull_request` (PR/commit lookup), `functions.web_search` (web), `functions.edit_notebook` (notebooks), `multi_tool_use.parallel` (parallelize calls).
+- It prefers search+read before editing, uses `apply_patch` for changes, falls back to `edit_file` if needed, and validates via shell tests/linters.
 
 ---
 
