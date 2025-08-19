@@ -416,6 +416,8 @@ Key features:
 - **Context Window Tracking**: Monitor token usage and context limits
 - **No Automatic Trimming**: Users control when to compress context
 
+For detailed information about how the summarization system works, including the summarization prompt and process, see [Codex Summarization System](./docs/summarization.md).
+
 ---
 
 ## Non-interactive / CI mode

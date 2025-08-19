@@ -84,62 +84,22 @@ Different models have varying context limits:
 
 ### Manual Compression with `/compact`
 
-When context limits are approached, users can manually compress the conversation:
+When context limits are approached, users can manually compress the conversation. For detailed information about the summarization process, see [Codex Summarization System](./summarization.md).
 
 #### **How `/compact` Works**
 
-1. **Triggers Summarization Task**:
-   ```rust
-   let task = AgentTask::compact(
-       sess.clone(),
-       Arc::clone(&turn_context),
-       sub.id,
-       items,
-       SUMMARIZATION_PROMPT.to_string(),
-   );
-   ```
-
+1. **Triggers Summarization Task**: Creates a dedicated `AgentTask::compact` task
 2. **Sends Full History**: The entire conversation history is sent to the model with summarization instructions
+3. **Generates Summary**: The model creates a structured summary (see [Summarization Prompt](./summarization.md#the-summarization-prompt))
+4. **Replaces History**: The conversation history is replaced with just the summary
 
-3. **Generates Summary**: The model creates a structured summary including:
-   - **Objective**: High-level goal being solved
-   - **User Instructions**: Key requirements and decisions
-   - **AI Actions**: Main code changes and behaviors
-   - **Important Entities**: Functions, variables, files discussed
-   - **Open Issues**: Unresolved questions or next steps
+#### **Summarization Process**
 
-4. **Replaces History**: The conversation history is replaced with just the summary:
-   ```rust
-   state.history.keep_last_messages(1);
-   ```
-
-#### **Summarization Prompt**
-
-The summarization uses a structured format:
-
-```markdown
-You are a summarization assistant. A conversation follows between a user and a coding-focused AI (Codex). Your task is to generate a clear summary capturing:
-
-• High-level objective or problem being solved  
-• Key instructions or design decisions given by the user  
-• Main code actions or behaviors from the AI  
-• Important variables, functions, modules, or outputs discussed  
-• Any unresolved questions or next steps
-
-Produce the summary in a structured format like:
-
-**Objective:** …
-
-**User instructions:** … (bulleted)
-
-**AI actions / code behavior:** … (bulleted)
-
-**Important entities:** … (e.g. function names, variables, files)
-
-**Open issues / next steps:** … (if any)
-
-**Summary (concise):** (one or two sentences)
-```
+The summarization process:
+- **Uses a Special Prompt**: Replaces normal system instructions with summarization-specific guidance
+- **Runs Without Tools**: No file system or tool access during summarization
+- **Preserves Structure**: Creates organized summaries with clear sections
+- **Replaces History**: Keeps only the summary, discarding all previous context
 
 ### What Gets Preserved vs. Lost
 
