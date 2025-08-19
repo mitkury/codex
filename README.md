@@ -36,6 +36,7 @@
 - [System requirements](#system-requirements)
 - [CLI reference](#cli-reference)
 - [Memory & project docs](#memory--project-docs)
+  - [Conversation Context Management](#conversation-context-management)
 - [Non-interactive / CI mode](#non-interactive--ci-mode)
 - [Model Context Protocol (MCP)](#model-context-protocol-mcp)
 - [Tracing / verbose logging](#tracing--verbose-logging)
@@ -404,6 +405,18 @@ You can give Codex extra instructions and guidance using `AGENTS.md` files. Code
 1. `~/.codex/AGENTS.md` - personal global guidance
 2. `AGENTS.md` at repo root - shared project notes
 3. `AGENTS.md` in the current working directory - sub-folder/feature specifics
+
+### Conversation Context Management
+
+Codex maintains comprehensive conversation history including the complete ReACT (Reasoning, Acting) chain. For detailed information about how context is accumulated, managed, and compressed, see [Conversation Context and ReACT Chain Management](./docs/conversation-context.md).
+
+Key features:
+- **Full ReACT Preservation**: All reasoning, actions, and results are preserved
+- **Manual Compression**: Use `/compact` to summarize long conversations
+- **Context Window Tracking**: Monitor token usage and context limits
+- **No Automatic Trimming**: Users control when to compress context
+
+For detailed information about how the summarization system works, including the summarization prompt and process, see [Codex Summarization System](./docs/summarization.md).
 
 ---
 
