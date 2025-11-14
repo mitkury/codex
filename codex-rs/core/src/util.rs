@@ -1,7 +1,8 @@
-use std::path::Path;
 use std::time::Duration;
 
 use rand::Rng;
+use tracing::debug;
+use tracing::error;
 
 const INITIAL_DELAY_MS: u64 = 200;
 const BACKOFF_FACTOR: f64 = 2.0;
@@ -13,32 +14,54 @@ pub(crate) fn backoff(attempt: u64) -> Duration {
     Duration::from_millis((base as f64 * jitter) as u64)
 }
 
-/// Return `true` if the project folder specified by the `Config` is inside a
-/// Git repository.
-///
-/// The check walks up the directory hierarchy looking for a `.git` file or
-/// directory (note `.git` can be a file that contains a `gitdir` entry). This
-/// approach does **not** require the `git` binary or the `git2` crate and is
-/// therefore fairly lightweight.
-///
-/// Note that this does **not** detect *work‑trees* created with
-/// `git worktree add` where the checkout lives outside the main repository
-/// directory. If you need Codex to work from such a checkout simply pass the
-/// `--allow-no-git-exec` CLI flag that disables the repo requirement.
-pub fn is_inside_git_repo(base_dir: &Path) -> bool {
-    let mut dir = base_dir.to_path_buf();
+pub(crate) fn error_or_panic(message: String) {
+    if cfg!(debug_assertions) || env!("CARGO_PKG_VERSION").contains("alpha") {
+        panic!("{message}");
+    } else {
+        error!("{message}");
+    }
+}
 
-    loop {
-        if dir.join(".git").exists() {
-            return true;
-        }
+pub(crate) fn try_parse_error_message(text: &str) -> String {
+    debug!("Parsing server error response: {}", text);
+    let json = serde_json::from_str::<serde_json::Value>(text).unwrap_or_default();
+    if let Some(error) = json.get("error")
+        && let Some(message) = error.get("message")
+        && let Some(message_str) = message.as_str()
+    {
+        return message_str.to_string();
+    }
+    if text.is_empty() {
+        return "Unknown error".to_string();
+    }
+    text.to_string()
+}
 
-        // Pop one component (go up one directory).  `pop` returns false when
-        // we have reached the filesystem root.
-        if !dir.pop() {
-            break;
-        }
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_try_parse_error_message() {
+        let text = r#"{
+  "error": {
+    "message": "Your refresh token has already been used to generate a new access token. Please try signing in again.",
+    "type": "invalid_request_error",
+    "param": null,
+    "code": "refresh_token_reused"
+  }
+}"#;
+        let message = try_parse_error_message(text);
+        assert_eq!(
+            message,
+            "Your refresh token has already been used to generate a new access token. Please try signing in again."
+        );
     }
 
-    false
+    #[test]
+    fn test_try_parse_error_message_no_error() {
+        let text = r#"{"message": "test"}"#;
+        let message = try_parse_error_message(text);
+        assert_eq!(message, r#"{"message": "test"}"#);
+    }
 }

@@ -5,8 +5,10 @@
 //!   2. User-defined entries inside `~/.codex/config.toml` under the `model_providers`
 //!      key. These override or extend the defaults at runtime.
 
-use codex_login::AuthMode;
-use codex_login::CodexAuth;
+use crate::CodexAuth;
+use crate::default_client::CodexHttpClient;
+use crate::default_client::CodexRequestBuilder;
+use codex_app_server_protocol::AuthMode;
 use serde::Deserialize;
 use serde::Serialize;
 use std::collections::HashMap;
@@ -17,6 +19,10 @@ use crate::error::EnvVarError;
 const DEFAULT_STREAM_IDLE_TIMEOUT_MS: u64 = 300_000;
 const DEFAULT_STREAM_MAX_RETRIES: u64 = 5;
 const DEFAULT_REQUEST_MAX_RETRIES: u64 = 4;
+/// Hard cap for user-configured `stream_max_retries`.
+const MAX_STREAM_MAX_RETRIES: u64 = 100;
+/// Hard cap for user-configured `request_max_retries`.
+const MAX_REQUEST_MAX_RETRIES: u64 = 100;
 
 /// Wire protocol that the provider speaks. Most third-party services only
 /// implement the classic OpenAI Chat Completions JSON schema, whereas OpenAI
@@ -49,6 +55,11 @@ pub struct ModelProviderInfo {
     /// variable and set it.
     pub env_key_instructions: Option<String>,
 
+    /// Value to use with `Authorization: Bearer <token>` header. Use of this
+    /// config is discouraged in favor of `env_key` for security reasons, but
+    /// this may be necessary when using this programmatically.
+    pub experimental_bearer_token: Option<String>,
+
     /// Which wire protocol this provider expects.
     #[serde(default)]
     pub wire_api: WireApi,
@@ -76,14 +87,17 @@ pub struct ModelProviderInfo {
     /// the connection as lost.
     pub stream_idle_timeout_ms: Option<u64>,
 
-    /// Whether this provider requires some form of standard authentication (API key, ChatGPT token).
+    /// Does this provider require an OpenAI API Key or ChatGPT login token? If true,
+    /// user is presented with login screen on first run, and login preference and token/key
+    /// are stored in auth.json. If false (which is the default), login screen is skipped,
+    /// and API key (if needed) comes from the "env_key" environment variable.
     #[serde(default)]
     pub requires_openai_auth: bool,
 }
 
 impl ModelProviderInfo {
     /// Construct a `POST` RequestBuilder for the given URL using the provided
-    /// reqwest Client applying:
+    /// [`CodexHttpClient`] applying:
     ///   • provider-specific headers (static + env based)
     ///   • Bearer auth header when an API key is available.
     ///   • Auth token for OAuth.
@@ -92,17 +106,21 @@ impl ModelProviderInfo {
     /// one produced by [`ModelProviderInfo::api_key`].
     pub async fn create_request_builder<'a>(
         &'a self,
-        client: &'a reqwest::Client,
+        client: &'a CodexHttpClient,
         auth: &Option<CodexAuth>,
-    ) -> crate::error::Result<reqwest::RequestBuilder> {
-        let effective_auth = match self.api_key() {
-            Ok(Some(key)) => Some(CodexAuth::from_api_key(&key)),
-            Ok(None) => auth.clone(),
-            Err(err) => {
-                if auth.is_some() {
-                    auth.clone()
-                } else {
-                    return Err(err);
+    ) -> crate::error::Result<CodexRequestBuilder> {
+        let effective_auth = if let Some(secret_key) = &self.experimental_bearer_token {
+            Some(CodexAuth::from_api_key(secret_key))
+        } else {
+            match self.api_key() {
+                Ok(Some(key)) => Some(CodexAuth::from_api_key(&key)),
+                Ok(None) => auth.clone(),
+                Err(err) => {
+                    if auth.is_some() {
+                        auth.clone()
+                    } else {
+                        return Err(err);
+                    }
                 }
             }
         };
@@ -155,10 +173,25 @@ impl ModelProviderInfo {
         }
     }
 
+    pub(crate) fn is_azure_responses_endpoint(&self) -> bool {
+        if self.wire_api != WireApi::Responses {
+            return false;
+        }
+
+        if self.name.eq_ignore_ascii_case("azure") {
+            return true;
+        }
+
+        self.base_url
+            .as_ref()
+            .map(|base| matches_azure_responses_base_url(base))
+            .unwrap_or(false)
+    }
+
     /// Apply provider-specific HTTP headers (both static and environment-based)
-    /// onto an existing `reqwest::RequestBuilder` and return the updated
+    /// onto an existing [`CodexRequestBuilder`] and return the updated
     /// builder.
-    fn apply_http_headers(&self, mut builder: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
+    fn apply_http_headers(&self, mut builder: CodexRequestBuilder) -> CodexRequestBuilder {
         if let Some(extra) = &self.http_headers {
             for (k, v) in extra {
                 builder = builder.header(k, v);
@@ -167,10 +200,10 @@ impl ModelProviderInfo {
 
         if let Some(env_headers) = &self.env_http_headers {
             for (header, env_var) in env_headers {
-                if let Ok(val) = std::env::var(env_var) {
-                    if !val.trim().is_empty() {
-                        builder = builder.header(header, val);
-                    }
+                if let Ok(val) = std::env::var(env_var)
+                    && !val.trim().is_empty()
+                {
+                    builder = builder.header(header, val);
                 }
             }
         }
@@ -207,12 +240,14 @@ impl ModelProviderInfo {
     pub fn request_max_retries(&self) -> u64 {
         self.request_max_retries
             .unwrap_or(DEFAULT_REQUEST_MAX_RETRIES)
+            .min(MAX_REQUEST_MAX_RETRIES)
     }
 
     /// Effective maximum number of stream reconnection attempts for this provider.
     pub fn stream_max_retries(&self) -> u64 {
         self.stream_max_retries
             .unwrap_or(DEFAULT_STREAM_MAX_RETRIES)
+            .min(MAX_STREAM_MAX_RETRIES)
     }
 
     /// Effective idle timeout for streaming responses.
@@ -250,6 +285,7 @@ pub fn built_in_model_providers() -> HashMap<String, ModelProviderInfo> {
                     .filter(|v| !v.trim().is_empty()),
                 env_key: None,
                 env_key_instructions: None,
+                experimental_bearer_token: None,
                 wire_api: WireApi::Responses,
                 query_params: None,
                 http_headers: Some(
@@ -309,6 +345,7 @@ pub fn create_oss_provider_with_base_url(base_url: &str) -> ModelProviderInfo {
         base_url: Some(base_url.into()),
         env_key: None,
         env_key_instructions: None,
+        experimental_bearer_token: None,
         wire_api: WireApi::Chat,
         query_params: None,
         http_headers: None,
@@ -318,6 +355,18 @@ pub fn create_oss_provider_with_base_url(base_url: &str) -> ModelProviderInfo {
         stream_idle_timeout_ms: None,
         requires_openai_auth: false,
     }
+}
+
+fn matches_azure_responses_base_url(base_url: &str) -> bool {
+    let base = base_url.to_ascii_lowercase();
+    const AZURE_MARKERS: [&str; 5] = [
+        "openai.azure.",
+        "cognitiveservices.azure.",
+        "aoai.azure.",
+        "azure-api.",
+        "azurefd.",
+    ];
+    AZURE_MARKERS.iter().any(|marker| base.contains(marker))
 }
 
 #[cfg(test)]
@@ -336,6 +385,7 @@ base_url = "http://localhost:11434/v1"
             base_url: Some("http://localhost:11434/v1".into()),
             env_key: None,
             env_key_instructions: None,
+            experimental_bearer_token: None,
             wire_api: WireApi::Chat,
             query_params: None,
             http_headers: None,
@@ -363,6 +413,7 @@ query_params = { api-version = "2025-04-01-preview" }
             base_url: Some("https://xxxxx.openai.azure.com/openai".into()),
             env_key: Some("AZURE_OPENAI_API_KEY".into()),
             env_key_instructions: None,
+            experimental_bearer_token: None,
             wire_api: WireApi::Chat,
             query_params: Some(maplit::hashmap! {
                 "api-version".to_string() => "2025-04-01-preview".to_string(),
@@ -393,6 +444,7 @@ env_http_headers = { "X-Example-Env-Header" = "EXAMPLE_ENV_VAR" }
             base_url: Some("https://example.com".into()),
             env_key: Some("API_KEY".into()),
             env_key_instructions: None,
+            experimental_bearer_token: None,
             wire_api: WireApi::Chat,
             query_params: None,
             http_headers: Some(maplit::hashmap! {
@@ -409,5 +461,72 @@ env_http_headers = { "X-Example-Env-Header" = "EXAMPLE_ENV_VAR" }
 
         let provider: ModelProviderInfo = toml::from_str(azure_provider_toml).unwrap();
         assert_eq!(expected_provider, provider);
+    }
+
+    #[test]
+    fn detects_azure_responses_base_urls() {
+        fn provider_for(base_url: &str) -> ModelProviderInfo {
+            ModelProviderInfo {
+                name: "test".into(),
+                base_url: Some(base_url.into()),
+                env_key: None,
+                env_key_instructions: None,
+                experimental_bearer_token: None,
+                wire_api: WireApi::Responses,
+                query_params: None,
+                http_headers: None,
+                env_http_headers: None,
+                request_max_retries: None,
+                stream_max_retries: None,
+                stream_idle_timeout_ms: None,
+                requires_openai_auth: false,
+            }
+        }
+
+        let positive_cases = [
+            "https://foo.openai.azure.com/openai",
+            "https://foo.openai.azure.us/openai/deployments/bar",
+            "https://foo.cognitiveservices.azure.cn/openai",
+            "https://foo.aoai.azure.com/openai",
+            "https://foo.openai.azure-api.net/openai",
+            "https://foo.z01.azurefd.net/",
+        ];
+        for base_url in positive_cases {
+            let provider = provider_for(base_url);
+            assert!(
+                provider.is_azure_responses_endpoint(),
+                "expected {base_url} to be detected as Azure"
+            );
+        }
+
+        let named_provider = ModelProviderInfo {
+            name: "Azure".into(),
+            base_url: Some("https://example.com".into()),
+            env_key: None,
+            env_key_instructions: None,
+            experimental_bearer_token: None,
+            wire_api: WireApi::Responses,
+            query_params: None,
+            http_headers: None,
+            env_http_headers: None,
+            request_max_retries: None,
+            stream_max_retries: None,
+            stream_idle_timeout_ms: None,
+            requires_openai_auth: false,
+        };
+        assert!(named_provider.is_azure_responses_endpoint());
+
+        let negative_cases = [
+            "https://api.openai.com/v1",
+            "https://example.com/openai",
+            "https://myproxy.azurewebsites.net/openai",
+        ];
+        for base_url in negative_cases {
+            let provider = provider_for(base_url);
+            assert!(
+                !provider.is_azure_responses_endpoint(),
+                "expected {base_url} not to be detected as Azure"
+            );
+        }
     }
 }

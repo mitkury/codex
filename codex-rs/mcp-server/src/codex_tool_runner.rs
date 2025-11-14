@@ -5,6 +5,10 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use crate::exec_approval::handle_exec_approval_request;
+use crate::outgoing_message::OutgoingMessageSender;
+use crate::outgoing_message::OutgoingNotificationMeta;
+use crate::patch_approval::handle_patch_approval_request;
 use codex_core::CodexConversation;
 use codex_core::ConversationManager;
 use codex_core::NewConversation;
@@ -14,22 +18,17 @@ use codex_core::protocol::ApplyPatchApprovalRequestEvent;
 use codex_core::protocol::Event;
 use codex_core::protocol::EventMsg;
 use codex_core::protocol::ExecApprovalRequestEvent;
-use codex_core::protocol::InputItem;
 use codex_core::protocol::Op;
 use codex_core::protocol::Submission;
 use codex_core::protocol::TaskCompleteEvent;
+use codex_protocol::ConversationId;
+use codex_protocol::user_input::UserInput;
 use mcp_types::CallToolResult;
 use mcp_types::ContentBlock;
 use mcp_types::RequestId;
 use mcp_types::TextContent;
 use serde_json::json;
 use tokio::sync::Mutex;
-use uuid::Uuid;
-
-use crate::exec_approval::handle_exec_approval_request;
-use crate::outgoing_message::OutgoingMessageSender;
-use crate::outgoing_message::OutgoingNotificationMeta;
-use crate::patch_approval::handle_patch_approval_request;
 
 pub(crate) const INVALID_PARAMS_ERROR_CODE: i64 = -32602;
 
@@ -43,7 +42,7 @@ pub async fn run_codex_tool_session(
     config: CodexConfig,
     outgoing: Arc<OutgoingMessageSender>,
     conversation_manager: Arc<ConversationManager>,
-    running_requests_id_to_codex_uuid: Arc<Mutex<HashMap<RequestId, Uuid>>>,
+    running_requests_id_to_codex_uuid: Arc<Mutex<HashMap<RequestId, ConversationId>>>,
 ) {
     let NewConversation {
         conversation_id,
@@ -92,7 +91,7 @@ pub async fn run_codex_tool_session(
     let submission = Submission {
         id: sub_id.clone(),
         op: Op::UserInput {
-            items: vec![InputItem::Text {
+            items: vec![UserInput::Text {
                 text: initial_prompt.clone(),
             }],
         },
@@ -119,16 +118,16 @@ pub async fn run_codex_tool_session_reply(
     outgoing: Arc<OutgoingMessageSender>,
     request_id: RequestId,
     prompt: String,
-    running_requests_id_to_codex_uuid: Arc<Mutex<HashMap<RequestId, Uuid>>>,
-    session_id: Uuid,
+    running_requests_id_to_codex_uuid: Arc<Mutex<HashMap<RequestId, ConversationId>>>,
+    conversation_id: ConversationId,
 ) {
     running_requests_id_to_codex_uuid
         .lock()
         .await
-        .insert(request_id.clone(), session_id);
+        .insert(request_id.clone(), conversation_id);
     if let Err(e) = conversation
         .submit(Op::UserInput {
-            items: vec![InputItem::Text { text: prompt }],
+            items: vec![UserInput::Text { text: prompt }],
         })
         .await
     {
@@ -154,7 +153,7 @@ async fn run_codex_tool_session_inner(
     codex: Arc<CodexConversation>,
     outgoing: Arc<OutgoingMessageSender>,
     request_id: RequestId,
-    running_requests_id_to_codex_uuid: Arc<Mutex<HashMap<RequestId, Uuid>>>,
+    running_requests_id_to_codex_uuid: Arc<Mutex<HashMap<RequestId, ConversationId>>>,
 ) {
     let request_id_str = match &request_id {
         RequestId::String(s) => s.clone(),
@@ -179,6 +178,8 @@ async fn run_codex_tool_session_inner(
                         cwd,
                         call_id,
                         reason: _,
+                        risk,
+                        parsed_cmd,
                     }) => {
                         handle_exec_approval_request(
                             command,
@@ -189,6 +190,8 @@ async fn run_codex_tool_session_inner(
                             request_id_str.clone(),
                             event.id.clone(),
                             call_id,
+                            parsed_cmd,
+                            risk,
                         )
                         .await;
                         continue;
@@ -200,6 +203,9 @@ async fn run_codex_tool_session_inner(
                         });
                         outgoing.send_response(request_id.clone(), result).await;
                         break;
+                    }
+                    EventMsg::Warning(_) => {
+                        continue;
                     }
                     EventMsg::ApplyPatchApprovalRequest(ApplyPatchApprovalRequestEvent {
                         call_id,
@@ -223,7 +229,7 @@ async fn run_codex_tool_session_inner(
                     }
                     EventMsg::TaskComplete(TaskCompleteEvent { last_agent_message }) => {
                         let text = match last_agent_message {
-                            Some(msg) => msg.clone(),
+                            Some(msg) => msg,
                             None => "".to_string(),
                         };
                         let result = CallToolResult {
@@ -257,23 +263,41 @@ async fn run_codex_tool_session_inner(
                     }
                     EventMsg::AgentReasoningRawContent(_)
                     | EventMsg::AgentReasoningRawContentDelta(_)
-                    | EventMsg::TaskStarted
+                    | EventMsg::TaskStarted(_)
                     | EventMsg::TokenCount(_)
                     | EventMsg::AgentReasoning(_)
                     | EventMsg::AgentReasoningSectionBreak(_)
                     | EventMsg::McpToolCallBegin(_)
                     | EventMsg::McpToolCallEnd(_)
+                    | EventMsg::McpListToolsResponse(_)
+                    | EventMsg::ListCustomPromptsResponse(_)
                     | EventMsg::ExecCommandBegin(_)
                     | EventMsg::ExecCommandOutputDelta(_)
                     | EventMsg::ExecCommandEnd(_)
                     | EventMsg::BackgroundEvent(_)
+                    | EventMsg::StreamError(_)
                     | EventMsg::PatchApplyBegin(_)
                     | EventMsg::PatchApplyEnd(_)
                     | EventMsg::TurnDiff(_)
+                    | EventMsg::WebSearchBegin(_)
+                    | EventMsg::WebSearchEnd(_)
                     | EventMsg::GetHistoryEntryResponse(_)
                     | EventMsg::PlanUpdate(_)
                     | EventMsg::TurnAborted(_)
-                    | EventMsg::ShutdownComplete => {
+                    | EventMsg::UserMessage(_)
+                    | EventMsg::ShutdownComplete
+                    | EventMsg::ViewImageToolCall(_)
+                    | EventMsg::RawResponseItem(_)
+                    | EventMsg::EnteredReviewMode(_)
+                    | EventMsg::ItemStarted(_)
+                    | EventMsg::ItemCompleted(_)
+                    | EventMsg::AgentMessageContentDelta(_)
+                    | EventMsg::ReasoningContentDelta(_)
+                    | EventMsg::ReasoningRawContentDelta(_)
+                    | EventMsg::UndoStarted(_)
+                    | EventMsg::UndoCompleted(_)
+                    | EventMsg::ExitedReviewMode(_)
+                    | EventMsg::DeprecationNotice(_) => {
                         // For now, we do not do anything extra for these
                         // events. Note that
                         // send(codex_event_to_notification(&event)) above has
